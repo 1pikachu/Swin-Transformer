@@ -30,6 +30,20 @@ from utils import load_checkpoint, load_pretrained, save_checkpoint, NativeScale
     reduce_tensor
 
 
+def trace_handler(p):
+    output = p.key_averages().table(sort_by="self_cpu_time_total")
+    print(output)
+    import pathlib
+    timeline_dir = str(pathlib.Path.cwd()) + '/timeline/'
+    if not os.path.exists(timeline_dir):
+        try:
+            os.makedirs(timeline_dir)
+        except:
+            pass
+    timeline_file = timeline_dir + 'timeline-' + str(torch.backends.quantized.engine) + \
+            '-' + str(p.step_num) + '-' + str(os.getpid()) + '.json'
+    p.export_chrome_trace(timeline_file)
+
 def parse_option():
     parser = argparse.ArgumentParser('Swin Transformer training and evaluation script', add_help=False)
     parser.add_argument('--cfg', type=str, required=True, metavar="FILE", help='path to config file', )
@@ -73,6 +87,15 @@ def parse_option():
     ## overwrite optimizer in config (*.yaml) if specified, e.g., fused_adam/fused_lamb
     parser.add_argument('--optim', type=str,
                         help='overwrite optimizer if provided, can be adamw/sgd/fused_adam/fused_lamb.')
+    # OOB
+    parser.add_argument('--precision', default="float32", type=str, help='precision')
+    parser.add_argument('--channels_last', default=1, type=int, help='Use NHWC or not')
+    parser.add_argument('--jit', action='store_true', default=False, help='enable JIT')
+    parser.add_argument('--profile', action='store_true', default=False, help='collect timeline')
+    parser.add_argument('--num_iter', default=200, type=int, help='test iterations')
+    parser.add_argument('--num_warmup', default=20, type=int, help='test warmup')
+    parser.add_argument('--device', default='cpu', type=str, help='cpu, cuda or xpu')
+    parser.add_argument('--nv_fuser', action='store_true', default=False, help='enable nv fuser')
 
     args, unparsed = parser.parse_known_args()
 
@@ -81,7 +104,7 @@ def parse_option():
     return args, config
 
 
-def main(config):
+def main(config, args):
     dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
 
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
@@ -94,10 +117,18 @@ def main(config):
         flops = model.flops()
         logger.info(f"number of GFLOPs: {flops / 1e9}")
 
-    model.cuda()
+    # model.cuda()
+    model = model.to(args.device)
+    if args.channels_last and args.device != "xpu":
+        model = model.to(memory_format=torch.channels_last)
+        print("---- use NHWC format")
     model_without_ddp = model
 
     optimizer = build_optimizer(config, model)
+    datatype = torch.float16 if args.precision == "float16" else torch.bfloat16 if args.precision == "bfloat16" else torch.float
+    if args.device == "xpu":
+        model, optimizer = torch.xpu.optimize(model=model, optimizer=optimizer, dtype=datatype)
+
     loss_scaler = NativeScalerWithGradNormCount()
 
     if config.TRAIN.ACCUMULATION_STEPS > 1:
@@ -113,6 +144,7 @@ def main(config):
     else:
         criterion = torch.nn.CrossEntropyLoss()
 
+    criterion = criterion.to(args.device)
     max_accuracy = 0.0
 
     if config.TRAIN.AUTO_RESUME:
@@ -145,46 +177,53 @@ def main(config):
 
     logger.info("Start training")
     start_time = time.time()
-    for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
+    #for epoch in range(config.TRAIN.START_EPOCH, config.TRAIN.EPOCHS):
+    for epoch in range(1):
         #data_loader_train.sampler.set_epoch(epoch)
 
-        train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
-                        loss_scaler)
-        if (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
-            save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, loss_scaler,
-                            logger)
+        model.train()
+        optimizer.zero_grad()
 
-        acc1, acc5, loss = validate(config, data_loader_val, model)
-        logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
-        max_accuracy = max(max_accuracy, acc1)
-        logger.info(f'Max accuracy: {max_accuracy:.2f}%')
+        if args.profile and args.device == "xpu":
+            train_one_epoch_profileXPU(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
+                            loss_scaler, args, datatype)
+        elif args.profile:
+            train_one_epoch_profile(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
+                            loss_scaler, args, datatype)
+        else:
+            train_one_epoch(config, model, criterion, data_loader_train, optimizer, epoch, mixup_fn, lr_scheduler,
+                            loss_scaler, args, datatype)
+        #if (epoch % config.SAVE_FREQ == 0 or epoch == (config.TRAIN.EPOCHS - 1)):
+        #    save_checkpoint(config, epoch, model_without_ddp, max_accuracy, optimizer, lr_scheduler, loss_scaler,
+        #                    logger)
+
+        #acc1, acc5, loss = validate(config, data_loader_val, model)
+        #logger.info(f"Accuracy of the network on the {len(dataset_val)} test images: {acc1:.1f}%")
+        #max_accuracy = max(max_accuracy, acc1)
+        #logger.info(f'Max accuracy: {max_accuracy:.2f}%')
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     logger.info('Training time {}'.format(total_time_str))
 
-
-def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler):
-    model.train()
-    optimizer.zero_grad()
-
+def train_one_epoch_profileXPU(config, model, criterion, data_loader,
+        optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, args, datatype):
     num_steps = len(data_loader)
-    batch_time = AverageMeter()
-    loss_meter = AverageMeter()
-    norm_meter = AverageMeter()
-    scaler_meter = AverageMeter()
+    total_time = 0.0
+    total_count = 0
 
-    start = time.time()
-    end = time.time()
     for idx, (samples, targets) in enumerate(data_loader):
-        samples = samples.cuda(non_blocking=True)
-        targets = targets.cuda(non_blocking=True)
+        if idx >= args.num_iter:
+            break
+        start_time = time.time()
+        samples = samples.to(args.device)
+        targets = targets.to(args.device)
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
-            outputs = model(samples)
+        with torch.autograd.profiler_legacy.profile(enabled=args.profile, use_xpu=True, record_shapes=False) as prof:
+            with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
+                outputs = model(samples)
         loss = criterion(outputs, targets)
         loss = loss / config.TRAIN.ACCUMULATION_STEPS
 
@@ -198,31 +237,165 @@ def train_one_epoch(config, model, criterion, data_loader, optimizer, epoch, mix
             lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
         loss_scale_value = loss_scaler.state_dict()["scale"]
 
-        torch.cuda.synchronize()
+        loss = loss.cpu()
+        outputs = outputs.cpu()
+        torch.xpu.synchronize()
+        duration = time.time() - start_time
+        print("iteration:{}, training time: {} sec.".format(idx, duration))
+        if idx >= args.num_warmup:
+            total_time += duration
+            total_count += 1
+        if args.profile and idx == profile_len:
+            import pathlib
+            timeline_dir = str(pathlib.Path.cwd()) + '/timeline/'
+            if not os.path.exists(timeline_dir):
+                try:
+                    os.makedirs(timeline_dir)
+                except:
+                    pass
+            torch.save(prof.key_averages().table(sort_by="self_xpu_time_total"),
+                timeline_dir+'profile.pt')
+            torch.save(prof.key_averages(group_by_input_shape=True).table(),
+                timeline_dir+'profile_detail.pt')
+            torch.save(prof.table(sort_by="id", row_limit=100000),
+                timeline_dir+'profile_detail_withId.pt')
+            prof.export_chrome_trace(timeline_dir+"trace.json")
+    batch_size = args.batch_size
+    avg_time = total_time / total_count
+    latency = avg_time / batch_size * 1000
+    perf = batch_size / avg_time
+    print("total time:{}, total count:{}".format(total_time, total_count))
+    print('%d epoch training latency: %6.2f ms'%(0, latency))
+    print('%d epoch training Throughput: %6.2f fps'%(0, perf))
 
-        loss_meter.update(loss.item(), targets.size(0))
-        if grad_norm is not None:  # loss_scaler return None if not update
-            norm_meter.update(grad_norm)
-        scaler_meter.update(loss_scale_value)
-        batch_time.update(time.time() - end)
-        end = time.time()
+def train_one_epoch_profile(config, model, criterion, data_loader,
+        optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, args, datatype):
+    num_steps = len(data_loader)
+    total_time = 0.0
+    total_count = 0
 
-        if idx % config.PRINT_FREQ == 0:
-            lr = optimizer.param_groups[0]['lr']
-            wd = optimizer.param_groups[0]['weight_decay']
-            memory_used = torch.cuda.max_memory_allocated() / (1024.0 * 1024.0)
-            etas = batch_time.avg * (num_steps - idx)
-            logger.info(
-                f'Train: [{epoch}/{config.TRAIN.EPOCHS}][{idx}/{num_steps}]\t'
-                f'eta {datetime.timedelta(seconds=int(etas))} lr {lr:.6f}\t wd {wd:.4f}\t'
-                f'time {batch_time.val:.4f} ({batch_time.avg:.4f})\t'
-                f'loss {loss_meter.val:.4f} ({loss_meter.avg:.4f})\t'
-                f'grad_norm {norm_meter.val:.4f} ({norm_meter.avg:.4f})\t'
-                f'loss_scale {scaler_meter.val:.4f} ({scaler_meter.avg:.4f})\t'
-                f'mem {memory_used:.0f}MB')
-    epoch_time = time.time() - start
-    logger.info(f"EPOCH {epoch} training takes {datetime.timedelta(seconds=int(epoch_time))}")
+    profile_len = min(len(data_loader), args.num_iter) // 2
+    if args.device == "cuda":
+        profile_act = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    else:
+        profile_act = [torch.profiler.ProfilerActivity.CPU]
 
+    with torch.profiler.profile(
+        activities=profile_act,
+        record_shapes=True,
+        schedule=torch.profiler.schedule(
+            wait=profile_len,
+            warmup=2,
+            active=1,
+        ),
+        on_trace_ready=trace_handler,
+    ) as p:
+        for idx, (samples, targets) in enumerate(data_loader):
+            if idx >= args.num_iter:
+                break
+            if args.channels_last:
+                samples = samples.to(memory_format=torch.channels_last)
+
+            start_time = time.time()
+            samples = samples.to(args.device)
+            targets = targets.to(args.device)
+
+            if mixup_fn is not None:
+                samples, targets = mixup_fn(samples, targets)
+            if args.device == "cuda":
+                with torch.cuda.amp.autocast(enabled=True, dtype=datatype):
+                    outputs = model(samples)
+            else:
+                with torch.cpu.amp.autocast(enabled=True, dtype=datatype):
+                    outputs = model(samples)
+            loss = criterion(outputs, targets)
+            loss = loss / config.TRAIN.ACCUMULATION_STEPS
+
+            # this attribute is added by timm on one optimizer (adahessian)
+            is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+            grad_norm = loss_scaler(loss, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
+                                    parameters=model.parameters(), create_graph=is_second_order,
+                                    update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
+            if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+                optimizer.zero_grad()
+                lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
+            loss_scale_value = loss_scaler.state_dict()["scale"]
+
+            loss = loss.cpu()
+            outputs = outputs.cpu()
+            if args.device == "cuda":
+                torch.cuda.synchronize()
+            duration = time.time() - start_time
+            print("iteration:{}, training time: {} sec.".format(idx, duration))
+            p.step()
+            if idx >= args.num_warmup:
+                total_time += duration
+                total_count += 1
+    batch_size = args.batch_size
+    avg_time = total_time / total_count
+    latency = avg_time / batch_size * 1000
+    perf = batch_size / avg_time
+    print("total time:{}, total count:{}".format(total_time, total_count))
+    print('%d epoch training latency: %6.2f ms'%(0, latency))
+    print('%d epoch training Throughput: %6.2f fps'%(0, perf))
+
+def train_one_epoch(config, model, criterion, data_loader,
+        optimizer, epoch, mixup_fn, lr_scheduler, loss_scaler, args, datatype):
+    num_steps = len(data_loader)
+    total_time = 0.0
+    total_count = 0
+
+    for idx, (samples, targets) in enumerate(data_loader):
+        if idx >= args.num_iter:
+            break
+        if args.channels_last and args.device != "xpu":
+            samples = samples.to(memory_format=torch.channels_last)
+        start_time = time.time()
+        samples = samples.to(args.device)
+        targets = targets.to(args.device)
+
+        if mixup_fn is not None:
+            samples, targets = mixup_fn(samples, targets)
+        if args.device == "cuda":
+            with torch.cuda.amp.autocast(enabled=True, dtype=datatype):
+                outputs = model(samples)
+        elif args.device == "xpu":
+            with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
+                outputs = model(samples)
+        else:
+            with torch.cpu.amp.autocast(enabled=True, dtype=datatype):
+                outputs = model(samples)
+        loss = criterion(outputs, targets)
+        loss = loss / config.TRAIN.ACCUMULATION_STEPS
+
+        # this attribute is added by timm on one optimizer (adahessian)
+        is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
+        grad_norm = loss_scaler(loss, optimizer, clip_grad=config.TRAIN.CLIP_GRAD,
+                                parameters=model.parameters(), create_graph=is_second_order,
+                                update_grad=(idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0)
+        if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
+            optimizer.zero_grad()
+            lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
+        loss_scale_value = loss_scaler.state_dict()["scale"]
+
+        loss = loss.cpu()
+        outputs = outputs.cpu()
+        if args.device == "cuda":
+            torch.cuda.synchronize()
+        elif args.device == "xpu":
+            torch.xpu.synchronize()
+        duration = time.time() - start_time
+        print("iteration:{}, training time: {} sec.".format(idx, duration))
+        if idx >= args.num_warmup:
+            total_time += duration
+            total_count += 1
+    batch_size = args.batch_size
+    avg_time = total_time / total_count
+    latency = avg_time / batch_size * 1000
+    perf = batch_size / avg_time
+    print("total time:{}, total count:{}".format(total_time, total_count))
+    print('%d epoch training latency: %6.2f ms'%(0, latency))
+    print('%d epoch training Throughput: %6.2f fps'%(0, perf))
 
 @torch.no_grad()
 def validate(config, data_loader, model):
@@ -308,10 +481,16 @@ if __name__ == '__main__':
 
     seed = config.SEED
     torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
     np.random.seed(seed)
     random.seed(seed)
-    cudnn.benchmark = True
+
+    if args.device == "xpu":
+        import intel_extension_for_pytorch
+    elif args.device == "cuda":
+        torch.backends.cuda.matmul.allow_tf32 = False
+
+    #torch.cuda.manual_seed(seed)
+    #cudnn.benchmark = True
 
     # linear scale the learning rate according to total batch size, may not be optimal
     linear_scaled_lr = config.TRAIN.BASE_LR * config.DATA.BATCH_SIZE / 512.0
@@ -340,4 +519,4 @@ if __name__ == '__main__':
     logger.info(config.dump())
     logger.info(json.dumps(vars(args)))
 
-    main(config)
+    main(config, args)
