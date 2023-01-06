@@ -105,7 +105,7 @@ def parse_option():
 
 
 def main(config, args):
-    dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(config)
+    dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn = build_loader(config, device=args.device)
 
     logger.info(f"Creating model:{config.MODEL.TYPE}/{config.MODEL.NAME}")
     model = build_model(config)
@@ -235,7 +235,7 @@ def train_one_epoch_profileXPU(config, model, criterion, data_loader,
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
             optimizer.zero_grad()
             lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-        loss_scale_value = loss_scaler.state_dict()["scale"]
+        # loss_scale_value = loss_scaler.state_dict()["scale"]
 
         loss = loss.cpu()
         outputs = outputs.cpu()
@@ -319,7 +319,7 @@ def train_one_epoch_profile(config, model, criterion, data_loader,
             if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
                 optimizer.zero_grad()
                 lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-            loss_scale_value = loss_scaler.state_dict()["scale"]
+            # loss_scale_value = loss_scaler.state_dict()["scale"]
 
             loss = loss.cpu()
             outputs = outputs.cpu()
@@ -376,7 +376,7 @@ def train_one_epoch(config, model, criterion, data_loader,
         if (idx + 1) % config.TRAIN.ACCUMULATION_STEPS == 0:
             optimizer.zero_grad()
             lr_scheduler.step_update((epoch * num_steps + idx) // config.TRAIN.ACCUMULATION_STEPS)
-        loss_scale_value = loss_scaler.state_dict()["scale"]
+        # loss_scale_value = loss_scaler.state_dict()["scale"]
 
         loss = loss.cpu()
         outputs = outputs.cpu()

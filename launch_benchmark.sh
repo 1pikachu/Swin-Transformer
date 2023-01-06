@@ -9,7 +9,9 @@ function main {
     set_environment
 
     # requirements
-    pip install timm==0.4.12
+    git clone https://github.com/1pikachu/pytorch-image-models.git -b develop
+    pip install -e pytorch-image-models  
+    # pip install timm==0.4.12
 
     # if multiple use 'xxx,xxx,xxx'
     model_name_list=($(echo "${model_name}" |sed 's/,/ /g'))

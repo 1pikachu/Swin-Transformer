@@ -40,7 +40,7 @@ except:
     from timm.data.transforms import _pil_interp
 
 
-def build_loader(config):
+def build_loader(config, device):
     config.defrost()
     dataset_train, config.MODEL.NUM_CLASSES = build_dataset(is_train=True, config=config)
     config.freeze()
@@ -79,7 +79,7 @@ def build_loader(config):
         mixup_fn = Mixup(
             mixup_alpha=config.AUG.MIXUP, cutmix_alpha=config.AUG.CUTMIX, cutmix_minmax=config.AUG.CUTMIX_MINMAX,
             prob=config.AUG.MIXUP_PROB, switch_prob=config.AUG.MIXUP_SWITCH_PROB, mode=config.AUG.MIXUP_MODE,
-            label_smoothing=config.MODEL.LABEL_SMOOTHING, num_classes=config.MODEL.NUM_CLASSES)
+            label_smoothing=config.MODEL.LABEL_SMOOTHING, num_classes=config.MODEL.NUM_CLASSES, device=device)
 
     return dataset_train, dataset_val, data_loader_train, data_loader_val, mixup_fn
 
