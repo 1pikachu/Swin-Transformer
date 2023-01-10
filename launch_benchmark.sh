@@ -9,6 +9,7 @@ function main {
     set_environment
 
     # requirements
+    pip install termcolor
     git clone https://github.com/1pikachu/pytorch-image-models.git -b develop
     pip install -e pytorch-image-models  
     # pip install timm==0.4.12
