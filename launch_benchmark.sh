@@ -56,8 +56,6 @@ function generate_core {
 	    if [[ "${mode_name}" == "realtime" ]];then
 	        addtion_options+=" --nv_fuser "
 	    fi
-	elif [[ "${mode_name}" == "train" && "${device}" == "xpu" ]];then
-	    OOB_EXEC_HEADER=" IPEX_XPU_ONEDNN_LAYOUT=0 "
 	fi
         printf " ${OOB_EXEC_HEADER} \
 	    python main.py --cfg configs/swin/swin_base_patch4_window7_224.yaml \
