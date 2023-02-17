@@ -96,6 +96,7 @@ def parse_option():
     parser.add_argument('--num_warmup', default=20, type=int, help='test warmup')
     parser.add_argument('--device', default='cpu', type=str, help='cpu, cuda or xpu')
     parser.add_argument('--nv_fuser', action='store_true', default=False, help='enable nv fuser')
+    parser.add_argument('--tensorboard', action='store_true', default=False, help='use tensorboard profile trace handler')
 
     args, unparsed = parser.parse_known_args()
 
@@ -279,6 +280,11 @@ def train_one_epoch_profile(config, model, criterion, data_loader,
         profile_act = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     else:
         profile_act = [torch.profiler.ProfilerActivity.CPU]
+    if args.tensorboard:
+        profile_trace_handler = torch.profiler.tensorboard_trace_handler('./timeline/tensorboard_results', worker_name='worker0')
+    else:
+        profile_trace_handler = trace_handler
+    
 
     with torch.profiler.profile(
         activities=profile_act,
@@ -288,7 +294,8 @@ def train_one_epoch_profile(config, model, criterion, data_loader,
             warmup=2,
             active=1,
         ),
-        on_trace_ready=trace_handler,
+        on_trace_ready=profile_trace_handler,
+        with_stack=True
     ) as p:
         for idx, (samples, targets) in enumerate(data_loader):
             if idx >= args.num_iter:
