@@ -53,16 +53,18 @@ function generate_core {
             OOB_EXEC_HEADER+=" -C $(echo ${device_array[i]} |awk -F ';' '{print $1}') "
         elif [ "${device}" == "cuda" ];then
             OOB_EXEC_HEADER=" CUDA_VISIBLE_DEVICES=${device_array[i]} "
-	    if [[ "${mode_name}" == "realtime" ]];then
-	        addtion_options+=" --nv_fuser "
-	    fi
-	fi
+            if [[ "${mode_name}" == "realtime" ]];then
+                addtion_options+=" --nv_fuser "
+            fi
+        elif [ "${device}" == "xpu" ];then
+            OOB_EXEC_HEADER=" ZE_AFFINITY_MASK=${i} "
+        fi
         printf " ${OOB_EXEC_HEADER} \
-	    python main.py --cfg configs/swin/swin_base_patch4_window7_224.yaml \
-	    	--data-path ${DATASET_DIR} --batch-size ${batch_size} \
-		--accumulation-steps 2 --device ${device} \
-		--num_iter $num_iter --num_warmup $num_warmup \
-		--channels_last $channels_last --precision $precision \
+	        python main.py --cfg configs/swin/swin_base_patch4_window7_224.yaml \
+                --data-path ${DATASET_DIR} --batch-size ${batch_size} \
+                --accumulation-steps 2 --device ${device} \
+                --num_iter $num_iter --num_warmup $num_warmup \
+                --channels_last $channels_last --precision $precision \
                 ${addtion_options} \
         > ${log_file} 2>&1 &  \n" |tee -a ${excute_cmd_file}
         if [ "${numa_nodes_use}" == "0" ];then
