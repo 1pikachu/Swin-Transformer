@@ -97,6 +97,10 @@ def parse_option():
     parser.add_argument('--device', default='cpu', type=str, help='cpu, cuda or xpu')
     parser.add_argument('--nv_fuser', action='store_true', default=False, help='enable nv fuser')
     parser.add_argument('--tensorboard', action='store_true', default=False, help='use tensorboard profile trace handler')
+    parser.add_argument('--ipex', action='store_true', default=False)
+    parser.add_argument('--compile', action='store_true', default=False, help='compile model')
+    parser.add_argument('--backend', default="inductor", type=str, help='backend')
+
 
     args, unparsed = parser.parse_known_args()
 
@@ -127,8 +131,11 @@ def main(config, args):
 
     optimizer = build_optimizer(config, model)
     datatype = torch.float16 if args.precision == "float16" else torch.bfloat16 if args.precision == "bfloat16" else torch.float
-    if args.device == "xpu":
+    if args.device == "xpu" and args.ipex:
         model, optimizer = torch.xpu.optimize(model=model, optimizer=optimizer, dtype=datatype)
+    if args.compile:
+        print("----enable compiler")
+        model = torch.compile(model, backend=args.backend, options={"freezing": True})
 
     loss_scaler = NativeScalerWithGradNormCount()
 
@@ -491,8 +498,9 @@ if __name__ == '__main__':
     np.random.seed(seed)
     random.seed(seed)
 
-    if args.device == "xpu":
+    if args.device == "xpu" and args.ipex:
         import intel_extension_for_pytorch
+        print("Use IPEX")
     elif args.device == "cuda":
         torch.backends.cuda.matmul.allow_tf32 = False
 
