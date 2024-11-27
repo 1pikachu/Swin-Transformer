@@ -230,7 +230,7 @@ def train_one_epoch_profileXPU(config, model, criterion, data_loader,
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
         with torch.autograd.profiler_legacy.profile(enabled=args.profile, use_xpu=True, record_shapes=False) as prof:
-            with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
+            with torch.autocast(enabled=True, dtype=datatype, device_type=args.device):
                 outputs = model(samples)
         loss = criterion(outputs, targets)
         loss = loss / config.TRAIN.ACCUMULATION_STEPS
@@ -316,12 +316,8 @@ def train_one_epoch_profile(config, model, criterion, data_loader,
 
             if mixup_fn is not None:
                 samples, targets = mixup_fn(samples, targets)
-            if args.device == "cuda":
-                with torch.cuda.amp.autocast(enabled=True, dtype=datatype):
-                    outputs = model(samples)
-            else:
-                with torch.cpu.amp.autocast(enabled=True, dtype=datatype):
-                    outputs = model(samples)
+            with torch.autocast(enabled=True, dtype=datatype, device_type=args.device):
+                outputs = model(samples)
             loss = criterion(outputs, targets)
             loss = loss / config.TRAIN.ACCUMULATION_STEPS
 
@@ -370,15 +366,8 @@ def train_one_epoch(config, model, criterion, data_loader,
 
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
-        if args.device == "cuda":
-            with torch.cuda.amp.autocast(enabled=True, dtype=datatype):
-                outputs = model(samples)
-        elif args.device == "xpu":
-            with torch.xpu.amp.autocast(enabled=True, dtype=datatype):
-                outputs = model(samples)
-        else:
-            with torch.cpu.amp.autocast(enabled=True, dtype=datatype):
-                outputs = model(samples)
+        with torch.autocast(enabled=True, dtype=datatype, device_type=args.device):
+            outputs = model(samples)
         loss = criterion(outputs, targets)
         loss = loss / config.TRAIN.ACCUMULATION_STEPS
 
@@ -427,7 +416,7 @@ def validate(config, data_loader, model):
         target = target.cuda(non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast(enabled=config.AMP_ENABLE):
+        with torch.autocast(enabled=config.AMP_ENABLE):
             output = model(images)
 
         # measure accuracy and record loss
