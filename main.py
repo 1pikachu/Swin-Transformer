@@ -124,7 +124,7 @@ def main(config, args):
 
     # model.cuda()
     model = model.to(args.device)
-    if args.channels_last and args.device != "xpu":
+    if args.channels_last:
         model = model.to(memory_format=torch.channels_last)
         print("---- use NHWC format")
     model_without_ddp = model
@@ -358,7 +358,7 @@ def train_one_epoch(config, model, criterion, data_loader,
     for idx, (samples, targets) in enumerate(data_loader):
         if idx >= args.num_iter:
             break
-        if args.channels_last and args.device != "xpu":
+        if args.channels_last:
             samples = samples.to(memory_format=torch.channels_last)
         start_time = time.time()
         samples = samples.to(args.device)
